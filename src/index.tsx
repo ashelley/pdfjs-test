@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import {render as renderReactApp} from 'react-dom'
 import App from './App'
 
@@ -32,15 +32,16 @@ async function main() {
     start()
 }
 
-let fonts = {}
+let fonts:{[name:string]:IDrawingFont} = {}
 
 async function init() {
     let resolve
     let promise = new Promise(r => resolve = r)
     //let times = softwareCanvas.registerFont('assets/times.ttf', 'Times')
     //times.load(() => resolve())    
-    opentype.load('assets/times.ttf', (font) => {
-        fonts['standard'] = font
+    opentype.load('assets/times.ttf', (err, font) => {
+        if(err) throw err
+        fonts['Times'] = new WrappedOpenTypeFont(font)
         resolve()
     })
 }
@@ -104,6 +105,17 @@ enum ContextGlobalCompositeOperation {
     SOURCE_OVER = "source-over"
 }
 
+enum DrawingFontStyle {
+    Normal = "normal",
+    Italic = "italic",
+    Oblique = "oblique"
+}
+
+enum DrawingFontVariant {
+    Normal = "normal",
+    //TODO:
+}
+
 interface IDrawingContextState {
     x:number,
     y:number,
@@ -115,6 +127,14 @@ interface IDrawingContextState {
     lineCap: ContextLineCap,
     lineJoin: ContextLineJoin,
     font: string //10px sans-serif
+    fontStyle: DrawingFontStyle
+    fontObliqueAngle:number
+    fontVariants: DrawingFontVariant[]
+    fontSize:number //TODO: support non-pixel sizes
+    lineHeight:number
+    fontFamily:string
+    fontFamilyAlternative:string
+    //TODO: font-stretch
     transformationMatrix: [number,number,number,number,number,number]
 }
 
@@ -126,10 +146,35 @@ interface IDrawingContext {
 class SoftwareContext implements IDrawingContext {
     state:Partial<IDrawingContextState> = {}
 
+    _height:number
+    _width:number
     _temp2dContext:CanvasRenderingContext2D
 
-    constructor(width, fakeContext) {
+    constructor(width, height, fakeContext) {
         this._temp2dContext = fakeContext
+        this._width = width
+        this._height = height
+    }
+
+    set font(value:string) {
+        console.warn("Unable to full parse font: " + value)
+        this.state.fontFamily = "Times"
+        let parts = value.split(" ");
+        //TODO: proper font parsing
+        //normal normal 16px "Times", serif
+        if(parts.length == 5) {        
+            let fontStyle = parts[0]
+            let fontVariant = parts[1]
+            let fontSize = parts[2]
+            if(fontSize.endsWith("px")) {
+                this.state.fontSize = parseFloat(fontSize.substr(0,fontSize.length-2))                
+            }
+            let quotedFontName = parts[3]
+            if(quotedFontName.startsWith('"') && quotedFontName.endsWith('",')) {
+                this.state.fontFamily = quotedFontName.substr(1,quotedFontName.length-3)
+            }
+            let fontAlternative = parts[4]
+        }
     }
 
     set fillStyle(value:string) {
@@ -166,13 +211,53 @@ class SoftwareContext implements IDrawingContext {
         if(args.length > 0) {
             console.warn("fillText not implemented for > 3 arguments")   
             console.table(args)            
+        }        
+        let currentFontFamily = this.state.fontFamily
+        let font:IDrawingFont
+        debugger
+        if(currentFontFamily != null) {
+            font = fonts[currentFontFamily]
         }
-        this.__withCurrentState(() => this._temp2dContext.fillText(text,x,y))
+
+        if(font != null) {
+            let glyphs = font.stringToGlyphs(text)
+            let x = this.state.x
+            let y = this.state.y
+            for(let i = 0; i < glyphs.length; i++) {
+                let glyph = glyphs[i]               
+                let bbox = {x1:0,y1:0,x2:0,y2:0}
+                try {
+                    bbox = glyph.getBoundingBox() 
+                }
+                catch(err) {
+                    console.error(err)
+                }
+                let canvas = document.createElement('canvas');
+                canvas.width = 2048//bbox.x2 - bbox.x1
+                canvas.height = 2048//bbox.y2 - bbox.y1
+                let ctx = canvas.getContext("2d")
+                //ctx.fillStyle = "blue"
+                //ctx.fillRect(0, 0, canvas.width, canvas.height);
+                let otGlyph = (glyph as any).glyph as IOpenTypeGlyph
+                otGlyph.draw(ctx,0,16,16)
+                this._temp2dContext.save()
+                //this._temp2dContext.scale(1,-1)                     
+                this._temp2dContext.translate(x,this._height - y)                           
+                this._temp2dContext.drawImage(canvas,0,0)
+                this._temp2dContext.restore()
+                let scaleFromFont = 0.1
+                x += otGlyph.advanceWidth * scaleFromFont
+                //this._temp2dContext.scale(1,1)
+            }
+        }
+        else {
+            this.__canvaswithCurrentState(() => this._temp2dContext.fillText(text,x,y))
+        }
     }
 
-    __withCurrentState(action:()=>void) {
+    __canvaswithCurrentState(action:()=>void) {
         this._temp2dContext.save()
-        this._temp2dContext.translate(this.state.x,this.state.y)
+        this._temp2dContext.translate(this.state.x,this._height - this.state.y)
         this._temp2dContext.fillStyle = this.state.fillStyle
         this._temp2dContext.strokeStyle = this.state.fillStyle
         action()
@@ -225,7 +310,7 @@ function getSoftwareCanvasContext(height, width) {
     canvas.width = width;
 
 
-    var softwareContext = new SoftwareContext(width, context)
+    var softwareContext = new SoftwareContext(width, height, context)
     var proxy = new DrawingContextProxyHandler("<root context>")
     return new Proxy(softwareContext, proxy)
 }
@@ -271,6 +356,10 @@ class ProxyHandler {
     set(target, name, value) {
         let pathToProp = this.path + "." + name
         console.log("set " + pathToProp, value)
+        if(name.startsWith("_")) {
+            console.error("underscored private propery access attempt: " + name)
+            console.error(target)
+        }
         return true
     }
 
@@ -290,8 +379,23 @@ class DrawingContextProxyHandler extends ProxyHandler {
     set(target, name, value) {
         super.set(target,name,value)
         let descriptor = Object.getOwnPropertyDescriptor(target,name)
+        let fromPrototype = false
+        if(descriptor == null) {
+            descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target),name)
+            if(descriptor != null) {
+                fromPrototype = true
+            }
+        }
         if(descriptor != null && descriptor.set != null) {
-            descriptor.set(value)            
+            if(fromPrototype) {
+                descriptor.set.call(target,value)            
+            }
+            else {
+                descriptor.set(value)            
+            }
+        }
+        else if(name.startsWith("_") && Object.prototype.hasOwnProperty(name)) {
+            target[name] = value
         }
         else {
             console.warn(name + ": no setter")
@@ -305,8 +409,53 @@ interface IDrawingTextMeasurement {
     width:number   
 }
 
-interface IDrawingTransform {
+interface IDrawingFont {
+    stringToGlyphs: (string) => IDrawingGlyph[]
+}
 
+interface IDrawingGlyph {
+    getBoundingBox:() => {x1:number,y1:number,x2:number,y2:number}
+}
+
+interface IDrawingTransform {
+    
+}
+
+interface IOpenTypeGlyph {
+    advanceWidth:number
+    getBoundingBox:() => {x1:number,y1:number,x2:number,y2:number}
+    draw:(ctx:CanvasRenderingContext2D,x:number,y:number,fontSize:number) => void
+}
+
+interface IOpentypeFont {
+    stringToGlyphs: (string) => IOpenTypeGlyph[]
+}
+
+class WrappedOpenTypeFont implements IDrawingFont {
+    font:IOpentypeFont
+    constructor(font:IOpentypeFont) {
+        this.font = font
+    }
+
+    stringToGlyphs(text:string):IDrawingGlyph[] {
+        let glyphs = this.font.stringToGlyphs(text)
+        let result = []
+        for(let i = 0; i < glyphs.length; i++) {
+            result.push(new WrappedOpenTypeGlyph(glyphs[i]))
+        }
+        return result
+    }
+}
+
+class WrappedOpenTypeGlyph implements IDrawingGlyph {
+    glyph:IOpenTypeGlyph    
+    constructor(glyph:IOpenTypeGlyph) {
+        this.glyph = glyph
+    }
+
+    getBoundingBox() {
+        return this.glyph.getBoundingBox()
+    }
 }
 
 class MozCurrentTransform implements IDrawingTransform {
