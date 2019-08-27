@@ -233,20 +233,28 @@ class SoftwareContext implements IDrawingContext {
                     console.error(err)
                 }
                 let canvas = document.createElement('canvas');
-                canvas.width = 2048//bbox.x2 - bbox.x1
-                canvas.height = 2048//bbox.y2 - bbox.y1
+                let scale = this.state.fontSize / font.unitsPerEm()
+                var width = bbox.y2 * scale;
+                var height = bbox.y2 * scale;
+                if(width === 0 || height === 0) continue
+                canvas.width = Math.floor(width)
+                canvas.height = Math.floor(height)
                 let ctx = canvas.getContext("2d")
+                ctx.save()
                 //ctx.fillStyle = "blue"
                 //ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.restore()
                 let otGlyph = (glyph as any).glyph as IOpenTypeGlyph
-                otGlyph.draw(ctx,0,16,16)
+                ctx.scale(1,-1)
+                otGlyph.draw(ctx,0,0,16)
                 this._temp2dContext.save()
-                //this._temp2dContext.scale(1,-1)                     
+                //this._temp2dContext.scale(scale,-scale)                     
                 this._temp2dContext.translate(x,this._height - y)                           
                 this._temp2dContext.drawImage(canvas,0,0)
                 this._temp2dContext.restore()
-                let scaleFromFont = 0.1
-                x += otGlyph.advanceWidth * scaleFromFont
+                //let scaleFromFont = 0.1
+                x += otGlyph.advanceWidth * scale
+                debugger
                 //this._temp2dContext.scale(1,1)
             }
         }
@@ -269,9 +277,10 @@ class SoftwareContext implements IDrawingContext {
         console.table(arguments)                
 
         var instance = {
-            width: 1
+            width: 72
         }
         var proxy = new Proxy(instance, new ProxyHandler("fontMeasurement"))             
+        debugger
         return proxy
     }
  
@@ -411,6 +420,7 @@ interface IDrawingTextMeasurement {
 
 interface IDrawingFont {
     stringToGlyphs: (string) => IDrawingGlyph[]
+    unitsPerEm:() => number
 }
 
 interface IDrawingGlyph {
@@ -424,17 +434,22 @@ interface IDrawingTransform {
 interface IOpenTypeGlyph {
     advanceWidth:number
     getBoundingBox:() => {x1:number,y1:number,x2:number,y2:number}
-    draw:(ctx:CanvasRenderingContext2D,x:number,y:number,fontSize:number) => void
+    draw:(ctx:CanvasRenderingContext2D,x?:number,y?:number,fontSize?:number) => void
 }
 
 interface IOpentypeFont {
     stringToGlyphs: (string) => IOpenTypeGlyph[]
+    unitsPerEm:number
 }
 
 class WrappedOpenTypeFont implements IDrawingFont {
     font:IOpentypeFont
     constructor(font:IOpentypeFont) {
         this.font = font
+    }
+
+    unitsPerEm() {
+        return this.font.unitsPerEm
     }
 
     stringToGlyphs(text:string):IDrawingGlyph[] {
